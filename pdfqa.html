@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PDF Highlighting Tool (Precision Edition)</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.13.216/pdf_viewer.min.css" rel="stylesheet">
+    <style>
+        body {
+            margin: 20px;
+            font-family: Arial, sans-serif;
+        }
+        #toolbar {
+            margin-bottom: 10px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        #color-toolbar {
+            display: flex;
+            gap: 8px;
+            margin-left: 20px;
+        }
+        .color-option {
+            width: 30px;
+            height: 30px;
+            border: 2px solid #fff;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .color-option.active {
+            border-color: #000;
+            transform: scale(1.2);
+        }
+        #page-controls {
+            margin: 15px 0;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        #pdf-container {
+            position: relative;
+            border: 1px solid #ccc;
+            overflow: auto;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .canvas-wrapper {
+            position: relative;
+        }
+        .textLayer {
+            position: absolute;
+            left: 0;
+            top: 0;
+            color: transparent;
+            line-height: 1;
+            pointer-events: auto;
+        }
+        .textLayer span {
+            cursor: text;
+        }
+        .highlight {
+            background-color: rgba(255,230,0,0.8) !important;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            transition: background-color 0.2s;
+        }
+        .highlight.red { background-color: rgba(255,60,60,0.8) !important; }
+        .highlight.green { background-color: rgba(50,205,50,0.8) !important; }
+        .highlight.blue { background-color: rgba(30,144,255,0.8) !important; }
+        .highlight.purple { background-color: rgba(147,112,219,0.8) !important; }
+        .selection-box {
+            position: absolute;
+            border: 2px dashed #0066cc;
+            background: rgba(0,102,204,0.1);
+            pointer-events: none;
+            animation: boxFade 0.3s;
+        }
+        @keyframes boxFade { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <input type="file" id="fileInput" accept=".pdf">
+        <button onclick="saveHighlights()">Save Highlights</button>
+        <button onclick="clearHighlights()">Clear Highlights</button>
+        <div id="color-toolbar">
+            <div class="color-option active" style="background:#FFE600" data-color="default" onclick="selectColor(this)"></div>
+            <div class="color-option" style="background:#FF3C3C" data-color="red" onclick="selectColor(this)"></div>
+            <div class="color-option" style="background:#32CD32" data-color="green" onclick="selectColor(this)"></div>
+            <div class="color-option" style="background:#1E90FF" data-color="blue" onclick="selectColor(this)"></div>
+            <div class="color-option" style="background:#9370DB" data-color="purple" onclick="selectColor(this)"></div>
+        </div>
+    </div>
+
+    <div id="page-controls">
+        <button onclick="changePage(-1)">Previous Page</button>
+        <span id="current-page">1</span>/<span id="total-pages">-</span>
+        <button onclick="changePage(1)">Next Page</button>
+    </div>
+
+    <div id="pdf-container">
+        <div class="canvas-wrapper">
+            <canvas id="pdf-canvas"></canvas>
+            <div id="text-layer" class="textLayer"></div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.13.216/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.13.216/pdf_viewer.min.js"></script>
+
+    <script>
+        let pdfDoc = null;
+        let currentPage = 1;
+        let totalPages = 0;
+        let viewportScale = 1.5;
+        let highlights = {};
+        let isSelecting = false;
+        let selectionStart = null;
+        let currentColor = 'default';
+
+        // File selection listener
+        document.getElementById('fileInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const url = URL.createObjectURL(file);
+            pdfDoc = await pdfjsLib.getDocument(url).promise;
+            totalPages = pdfDoc.numPages;
+            document.getElementById('total-pages').textContent = totalPages;
+            await renderPage(currentPage);
+        });
+
+        // Render PDF page
+        async function renderPage(pageNum) {
+            if (pageNum < 1 || pageNum > totalPages) return;
+            
+            saveCurrentPageHighlights(); // Save current page highlights
+            currentPage = pageNum;
+            document.getElementById('current-page').textContent = pageNum;
+
+            const page = await pdfDoc.getPage(pageNum);
+            const viewport = page.getViewport({ scale: viewportScale });
+            const canvas = document.getElementById('pdf-canvas');
+            const context = canvas.getContext('2d');
+            
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            const textLayer = document.getElementById('text-layer');
+            textLayer.innerHTML = '';
+            textLayer.style.height = viewport.height + 'px';
+            textLayer.style.width = viewport.width + 'px';
+
+            await page.render({ canvasContext: context, viewport }).promise;
+
+            // Render text layer
+            const textContent = await page.getTextContent({ normalizeWhitespace: true });
+            const textLayerBuilder = new pdfjsViewer.TextLayerBuilder({
+                textLayerDiv: textLayer,
+                viewport: viewport,
+                pageIndex: pageNum - 1,
+                enhanceTextSelection: true
+            });
+            textLayerBuilder.setTextContent(textContent);
+            textLayerBuilder.render();
+
+            loadPageHighlights(pageNum); // Load current page highlights
+            setupHighlightInteraction();
+        }
+
+        // Page navigation
+        async function changePage(offset) {
+            await renderPage(currentPage + offset);
+        }
+
+        // Highlight interaction setup
+        function setupHighlightInteraction() {
+            const textLayer = document.getElementById('text-layer');
+            
+            textLayer.addEventListener('mousedown', (e) => {
+                isSelecting = true;
+                selectionStart = getMousePosition(e);
+                clearSelectionBox();
+            });
+
+            textLayer.addEventListener('mousemove', (e) => {
+                if (!isSelecting) return;
+                drawSelectionBox(selectionStart, getMousePosition(e));
+            });
+
+            textLayer.addEventListener('mouseup', (e) => {
+                if (!isSelecting) return;
+                isSelecting = false;
+                applyRangeHighlight(selectionStart, getMousePosition(e));
+                clearSelectionBox();
+            });
+
+            textLayer.addEventListener('click', (e) => {
+                const target = e.target.closest('.textLayer > span');
+                if (target) toggleHighlight(target);
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    isSelecting = false;
+                    clearSelectionBox();
+                }
+            });
+        }
+
+        // Improved coordinate calculation
+        function getMousePosition(e) {
+            const textLayer = document.getElementById('text-layer');
+            const rect = textLayer.getBoundingClientRect();
+            const scaleX = textLayer.offsetWidth / rect.width;
+            const scaleY = textLayer.offsetHeight / rect.height;
+            return {
+                x: (e.clientX - rect.left) * scaleX,
+                y: (e.clientY - rect.top) * scaleY,
+                page: currentPage
+            };
+        }
+
+        // Improved highlight logic
+        function applyRangeHighlight(start, end) {
+            const textLayer = document.getElementById('text-layer');
+            const spans = [...textLayer.querySelectorAll('span')];
+            const selectionRect = {
+                left: Math.min(start.x, end.x),
+                top: Math.min(start.y, end.y),
+                right: Math.max(start.x, end.x),
+                bottom: Math.max(start.y, end.y)
+            };
+
+            spans.forEach(span => {
+                const rect = span.getBoundingClientRect();
+                const spanPos = {
+                    left: rect.left - textLayer.offsetLeft,
+                    right: rect.right - textLayer.offsetLeft,
+                    top: rect.top - textLayer.offsetTop,
+                    bottom: rect.bottom - textLayer.offsetTop
+                };
+
+                // Check if fully contained within the selection area
+                if (isFullyContained(spanPos, selectionRect)) {
+                    toggleHighlight(span);
+                }
+            });
+        }
+
+        function isFullyContained(spanRect, selectionRect) {
+            return (
+                spanRect.left >= selectionRect.left &&
+                spanRect.right <= selectionRect.right &&
+                spanRect.top >= selectionRect.top &&
+                spanRect.bottom <= selectionRect.bottom
+            );
+        }
+
+        // Highlight operations
+        function toggleHighlight(element) {
+            element.classList.remove('highlight', 'red', 'green', 'blue', 'purple');
+            element.classList.add('highlight', currentColor);
+            
+            const highlightId = element.dataset.highlightId || Date.now();
+            if (element.classList.contains('highlight')) {
+                highlights[currentPage] = highlights[currentPage] || [];
+                highlights[currentPage].push({
+                    id: highlightId,
+                    color: currentColor,
+                    rect: {
+                        x: parseFloat(element.style.left),
+                        y: parseFloat(element.style.top),
+                        width: parseFloat(element.style.width),
+                        height: parseFloat(element.style.height)
+                    },
+                    text: element.textContent
+                });
+                element.dataset.highlightId = highlightId;
+            } else {
+                highlights[currentPage] = highlights[currentPage].filter(h => h.id !== highlightId);
+            }
+        }
+
+        // Save/load highlights
+        function saveCurrentPageHighlights() {
+            const pageHighlights = Array.from(document.querySelectorAll('.highlight'))
+                .map(hl => ({
+                    id: hl.dataset.highlightId,
+                    color: hl.classList[1] || 'default',
+                    rect: {
+                        x: parseFloat(hl.style.left),
+                        y: parseFloat(hl.style.top),
+                        width: parseFloat(hl.style.width),
+                        height: parseFloat(hl.style.height)
+                    },
+                    text: hl.textContent
+                }));
+            highlights[currentPage] = pageHighlights;
+            localStorage.setItem('pdfHighlights', JSON.stringify(highlights));
+        }
+
+        function loadPageHighlights(pageNum) {
+            const saved = localStorage.getItem('pdfHighlights');
+            if (!saved) return;
+
+            highlights = JSON.parse(saved);
+            const pageHighlights = highlights[pageNum] || [];
+            
+            pageHighlights.forEach(hl => {
+                const span = document.createElement('span');
+                span.className = `highlight ${hl.color}`;
+                span.style.cssText = `
+                    position: absolute;
+                    left: ${hl.rect.x}px;
+                    top: ${hl.rect.y}px;
+                    width: ${hl.rect.width}px;
+                    height: ${hl.rect.height}px;
+                `;
+                span.dataset.highlightId = hl.id;
+                span.textContent = hl.text;
+                document.getElementById('text-layer').appendChild(span);
+            });
+        }
+
+        // Utility functions
+        function selectColor(element) {
+            document.querySelectorAll('.color-option').forEach(btn => btn.classList.remove('active'));
+            element.classList.add('active');
+            currentColor = element.dataset.color;
+        }
+
+        function drawSelectionBox(start, end) {
+            const box = document.createElement('div');
+            box.className = 'selection-box';
+            box.style.left = Math.min(start.x, end.x) + 'px';
+            box.style.top = Math.min(start.y, end.y) + 'px';
+            box.style.width = Math.abs(end.x - start.x) + 'px';
+            box.style.height = Math.abs(end.y - start.y) + 'px';
+            document.getElementById('text-layer').appendChild(box);
+        }
+
+        function clearSelectionBox() {
+            document.querySelectorAll('.selection-box').forEach(box => box.remove());
+        }
+
+        function saveHighlights() {
+            saveCurrentPageHighlights();
+            alert('Highlights saved!');
+        }
+
+        function clearHighlights() {
+            document.querySelectorAll('.highlight').forEach(el => el.remove());
+            highlights = {};
+            localStorage.removeItem('pdfHighlights');
+        }
+    </script>
+</body>
+</html>
